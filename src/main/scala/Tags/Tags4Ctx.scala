@@ -1,8 +1,11 @@
 package Tags
 
+import org.apache.spark.graphx.{Edge, Graph}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.{SparkConf, SparkContext}
-import utils.TagsUtils
+import utils.{JedisPools, TagsUtils}
+
+import scala.collection.mutable.ListBuffer
 
 object Tags4Ctx {
   def main(args: Array[String]): Unit = {
@@ -39,31 +42,57 @@ object Tags4Ctx {
     val stopMapBc = sc.broadcast(stopMap)
 
     val sparkSql = SparkSession.builder().getOrCreate()
+    val data = sparkSql.read.parquet(logInputPath).where(TagsUtils.hasSomeUserIdCondition)
+    val ve = data.rdd.mapPartitions(par => {
+      val listBuffer = new collection.mutable.ListBuffer[(Long, (ListBuffer[String],List[(String,Int)]))]()
 
-    sparkSql.read.parquet(logInputPath).where(TagsUtils.hasSomeUserIdCondition).rdd.mapPartitions(par => {
-      val listBuffer = new collection.mutable.ListBuffer[(String,List[(String,Int)])]()
-
+      /*val jedis = JedisPools.getJedis()*/
       par.foreach(row => {
         val ads = Tags4Ads.makeTags(row)
-        val apps = Tags4APP.makeTags(row,broadCastDictMap.value)
+        val apps = Tags4APP.makeTags(row, broadCastDictMap.value)
         val devices = Tags4Device.makeTags(row)
-        val kws = Tags4Kw.makeTags(row,stopMapBc.value)
-
+        val kws = Tags4Kw.makeTags(row, stopMapBc.value)
+      /*  val business = Tag4Business.makeTags(row, jedis)*/
         val userId = TagsUtils.getAllUserId(row)
-        //ListBuffer((IMEI ,List((LC,1),(LN,1),(CN,1),(APP,1),(...)))
-        listBuffer.append((userId(0),(ads ++ apps ++ devices ++ kws).toList))
 
+        val tags = (ads ++ apps ++ devices ++ kws).toList
+        //ListBuffer((IMEI ,List((LC,1),(LN,1),(CN,1),(APP,1),(...)))
+        /* listBuffer.append((userId(0),(ads ++ apps ++ devices ++ kws ++ business).toList))*/
+        listBuffer.append((userId(0).hashCode().toLong, (userId,tags)))
       })
+//      jedis.close()
       listBuffer.iterator
     })
+
+    val edge = data.rdd.flatMap(row => {
+      val allUserId:ListBuffer[String] = TagsUtils.getAllUserId(row)
+      allUserId.map(uid => Edge(allUserId(0).hashCode.toLong,uid.hashCode.toLong,0))
+    })
+
+    val graph = Graph(ve,edge)
+
+    val cc = graph.connectedComponents().vertices
+
+    cc.join(ve).map{
+      case (xxid,(cmId,(uidList,tags))) => {
+        (cmId,(uidList,tags))
+      }
+    }.reduceByKey{
+      case (a,b) => {
+        val uids = a._1++b._1
+        val tags = (a._2++b._2).groupBy(_._1).mapValues(_.foldLeft(0)(_+_._2)).toList
+        (uids.distinct,tags)
+      }
+    }.saveAsTextFile(resultOutputPath)
       //(IMEI ,List((LC,1),(LN,1),(CN,1),(APP,1),(...))
-      .reduceByKey((a,b) => {
-      //((LC,1),..,(),..)
+      //(IMEI,(list1,list2))
+     /* .reduceByKey((a,b) => {
+      //(a ++ b) -> list((LC,1),(LC,1),(LD,1))
       //(LC,((LC,1),(LC,1))) => (LC,2)
       (a ++ b).groupBy(_._1).map{
         case (k,sameTags) => (k,sameTags.map(_._2).sum)
       }.toList
-    }).saveAsTextFile(resultOutputPath)
+    }).saveAsTextFile(resultOutputPath)*/
 
 
 
